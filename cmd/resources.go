@@ -3,8 +3,10 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -236,6 +238,40 @@ func loadResourceState(path string) (*resourceState, error) {
 func normalizeEndpoint(endpoint string) string {
 	// Normalize trailing slashes so create and cleanup compare the same endpoint identity.
 	return strings.TrimSuffix(endpoint, "/")
+}
+
+// parseOutputEndpoint splits a SonarQube endpoint into the template fields consumed by e2e configs.
+func parseOutputEndpoint(endpoint string) (string, int, string, error) {
+	parsedURL, err := url.Parse(endpoint)
+	if err != nil {
+		return "", 0, "", fmt.Errorf("invalid sonarqube.endpoint for output template: %w", err)
+	}
+	if parsedURL.Hostname() == "" {
+		return "", 0, "", fmt.Errorf("sonarqube.endpoint host is required for output template")
+	}
+
+	scheme := strings.ToLower(parsedURL.Scheme)
+	port := 0
+
+	// Keep template output stable even when callers omit the default port in the endpoint URL.
+	if parsedURL.Port() != "" {
+		parsedPort, err := strconv.Atoi(parsedURL.Port())
+		if err != nil {
+			return "", 0, "", fmt.Errorf("invalid sonarqube.endpoint port for output template: %w", err)
+		}
+		port = parsedPort
+	} else {
+		switch scheme {
+		case "https":
+			port = 443
+		case "http":
+			port = 80
+		default:
+			return "", 0, "", fmt.Errorf("unsupported sonarqube.endpoint scheme for output template: %s", parsedURL.Scheme)
+		}
+	}
+
+	return parsedURL.Hostname(), port, scheme, nil
 }
 
 // buildResourceState captures created resource identifiers for deterministic cleanup.
@@ -493,8 +529,15 @@ func runCreate(cmd *cobra.Command, args []string) error {
 
 	if outputTemplate != "" && outputFile != "" {
 		fmt.Fprintf(os.Stderr, "- Rendering output template to %s...\n", outputFile)
+		host, port, scheme, err := parseOutputEndpoint(cfg.SonarQube.Endpoint)
+		if err != nil {
+			return cleanupOnError(c, res, plan, effectiveTaskRunID, err, localFiles...)
+		}
 		data := map[string]interface{}{
 			"Endpoint": cfg.SonarQube.Endpoint,
+			"Host":     host,
+			"Port":     port,
+			"Scheme":   scheme,
 			"Users": []map[string]string{
 				{
 					"Login":    res.User.Login,

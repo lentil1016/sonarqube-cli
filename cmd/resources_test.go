@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -171,6 +172,182 @@ func TestResolveTaskRunID_UsesEnvWhenFlagEmpty(t *testing.T) {
 
 	if got := resolveTaskRunID(""); got != "env-task" {
 		t.Fatalf("resolveTaskRunID() = %q, want %q", got, "env-task")
+	}
+}
+
+// TestParseOutputEndpoint_UsesExplicitPort verifies explicit endpoint ports are preserved for template rendering.
+func TestParseOutputEndpoint_UsesExplicitPort(t *testing.T) {
+	host, port, scheme, err := parseOutputEndpoint("http://sonarqube.example.com:9000")
+	if err != nil {
+		t.Fatalf("parseOutputEndpoint() error = %v", err)
+	}
+	if host != "sonarqube.example.com" {
+		t.Fatalf("parseOutputEndpoint() host = %q, want sonarqube.example.com", host)
+	}
+	if port != 9000 {
+		t.Fatalf("parseOutputEndpoint() port = %d, want 9000", port)
+	}
+	if scheme != "http" {
+		t.Fatalf("parseOutputEndpoint() scheme = %q, want http", scheme)
+	}
+}
+
+// TestParseOutputEndpoint_UsesDefaultHTTPSPort verifies HTTPS endpoints without an explicit port still render a usable port.
+func TestParseOutputEndpoint_UsesDefaultHTTPSPort(t *testing.T) {
+	host, port, scheme, err := parseOutputEndpoint("https://sonarqube.example.com")
+	if err != nil {
+		t.Fatalf("parseOutputEndpoint() error = %v", err)
+	}
+	if host != "sonarqube.example.com" {
+		t.Fatalf("parseOutputEndpoint() host = %q, want sonarqube.example.com", host)
+	}
+	if port != 443 {
+		t.Fatalf("parseOutputEndpoint() port = %d, want 443", port)
+	}
+	if scheme != "https" {
+		t.Fatalf("parseOutputEndpoint() scheme = %q, want https", scheme)
+	}
+}
+
+// TestRunCreate_OutputTemplateIncludesDerivedEndpointFields verifies output templates receive Host, Port, and Scheme.
+func TestRunCreate_OutputTemplateIncludesDerivedEndpointFields(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	templatePath := filepath.Join(dir, "output.tmpl")
+	outputPath := filepath.Join(dir, "output.yaml")
+	tokenPath := filepath.Join(dir, "token.env")
+	statePath := filepath.Join(dir, "state.yaml")
+
+	oldConfigFile := configFile
+	oldTaskRunID := taskRunID
+	oldPlugin := plugin
+	oldOutputTemplate := outputTemplate
+	oldOutputFile := outputFile
+	oldTokenFile := tokenFile
+	oldStateFile := stateFile
+	oldManagerTokenFile := managerTokenFile
+	oldTempUserPasswordFile := tempUserPasswordFile
+	t.Cleanup(func() {
+		configFile = oldConfigFile
+		taskRunID = oldTaskRunID
+		plugin = oldPlugin
+		outputTemplate = oldOutputTemplate
+		outputFile = oldOutputFile
+		tokenFile = oldTokenFile
+		stateFile = oldStateFile
+		managerTokenFile = oldManagerTokenFile
+		tempUserPasswordFile = oldTempUserPasswordFile
+	})
+
+	templateData := `endpoint={{ $.Endpoint }}
+host={{ $.Host }}
+port={{ $.Port }}
+scheme={{ $.Scheme }}
+user={{ (index .Users 0).Login }}
+project={{ (index .Projects 0).Key }}
+`
+	if err := os.WriteFile(templatePath, []byte(templateData), 0600); err != nil {
+		t.Fatalf("WriteFile(template) error = %v", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/authorizations/groups", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+	})
+	mux.HandleFunc("/api/users/create", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/api/user_groups/add_user", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/api/permissions/create_template", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/api/permissions/add_group_to_template", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/api/projects/create", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/api/user_tokens/generate", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"token":"generated-token"}`)
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	cfgData := fmt.Sprintf(`sonarqube:
+  endpoint: %s
+  manager:
+    username: manager
+    token: manager-token
+  temp_resources:
+    - plugin_name: tektoncd
+      group:
+        name: test-group
+        description: Temporary group
+      user:
+        login: test-user
+        name: Test User
+        email: test@example.com
+        password: password
+      projects:
+        - key: test-project
+          name: Test Project
+      permission_template:
+        name: test-template
+        description: Test Template
+        project_key_pattern: test-.*
+        permissions:
+          - user
+`, server.URL)
+	if err := os.WriteFile(cfgPath, []byte(cfgData), 0600); err != nil {
+		t.Fatalf("WriteFile(config) error = %v", err)
+	}
+
+	configFile = cfgPath
+	taskRunID = ""
+	plugin = "tektoncd"
+	outputTemplate = templatePath
+	outputFile = outputPath
+	tokenFile = tokenPath
+	stateFile = statePath
+	managerTokenFile = ""
+	tempUserPasswordFile = ""
+
+	t.Setenv("SONARQUBE_ALLOW_HTTP", "true")
+	if err := runCreate(createCmd, nil); err != nil {
+		t.Fatalf("runCreate() error = %v", err)
+	}
+
+	parsedURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("url.Parse() error = %v", err)
+	}
+
+	outputData, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("ReadFile(output) error = %v", err)
+	}
+	output := string(outputData)
+	if !strings.Contains(output, "endpoint="+server.URL) {
+		t.Fatalf("output template missing endpoint: %s", output)
+	}
+	if !strings.Contains(output, "host="+parsedURL.Hostname()) {
+		t.Fatalf("output template missing host %q: %s", parsedURL.Hostname(), output)
+	}
+	if !strings.Contains(output, "port="+parsedURL.Port()) {
+		t.Fatalf("output template missing port %q: %s", parsedURL.Port(), output)
+	}
+	if !strings.Contains(output, "scheme="+parsedURL.Scheme) {
+		t.Fatalf("output template missing scheme %q: %s", parsedURL.Scheme, output)
+	}
+	if !strings.Contains(output, "user=test-user") {
+		t.Fatalf("output template missing user: %s", output)
+	}
+	if !strings.Contains(output, "project=test-project") {
+		t.Fatalf("output template missing project: %s", output)
 	}
 }
 
