@@ -1,0 +1,48 @@
+name: Semantic Release
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  release:
+    name: Semantic Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install semantic-release
+        run: |
+          npm install --save-dev semantic-release @semantic-release/commit-analyzer @semantic-release/release-notes-generator @semantic-release/changelog @semantic-release/git @semantic-release/github
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Build binaries
+        run: |
+          set -e
+          GOOS=linux GOARCH=amd64 go build -o sonarqube-cli-linux-amd64 ./cmd
+          GOOS=linux GOARCH=arm64 go build -o sonarqube-cli-linux-arm64 ./cmd
+          GOOS=darwin GOARCH=amd64 go build -o sonarqube-cli-darwin-amd64 ./cmd
+          GOOS=darwin GOARCH=arm64 go build -o sonarqube-cli-darwin-arm64 ./cmd
+
+      - name: Run semantic-release
+        run: npx semantic-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

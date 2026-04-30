@@ -3,12 +3,14 @@ name: Release
 on:
   push:
     tags:
-      - 'sonarqube-cli-v*'
+      - 'v*'
 
 jobs:
   release:
     name: Release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -31,3 +33,4 @@ jobs:
         with:
           files: |
             sonarqube-cli-*
+          draft: false
