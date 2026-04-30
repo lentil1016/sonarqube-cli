@@ -2,3 +2,4 @@ sonarqube-cli
 sonarqube-cli-*
 *.test
 *.out
+node_modules/

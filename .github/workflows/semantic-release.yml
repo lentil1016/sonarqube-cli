@@ -1,19 +1,33 @@
-name: Release
+name: Semantic Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches:
+      - main
 
 jobs:
   release:
-    name: Release
+    name: Semantic Release
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      issues: write
+      pull-requests: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -28,9 +42,7 @@ jobs:
           GOOS=darwin GOARCH=amd64 go build -o sonarqube-cli-darwin-amd64 ./cmd
           GOOS=darwin GOARCH=arm64 go build -o sonarqube-cli-darwin-arm64 ./cmd
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
-        with:
-          files: |
-            sonarqube-cli-*
-          draft: false
+      - name: Run semantic-release
+        run: npx semantic-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
